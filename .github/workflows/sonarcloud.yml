@@ -34,25 +34,32 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - '**/*.java'
-      - '**/pom.xml'
-      - '.mvn/**'
-      - 'mvnw'
-      - 'mvnw.cmd'
-      - 'sonar-project.properties'
-      - '.github/workflows/sonarcloud.yml'
+      # Java / Maven files (cover root and submodules)
+      - "**/*.java"
+      - "pom.xml"
+      - "**/pom.xml"
+      - ".mvn/**"
+      - "mvnw"
+      - "mvnw.cmd"
+      # Sonar properties (cover root and subdirs)
+      - "sonar-project.properties"
+      - "**/sonar-project.properties"
+      # Any workflow edits
+      - ".github/workflows/sonarcloud.yml"
   pull_request:
     branches: [ "main" ]
     types: [opened, synchronize, reopened]
     paths:
-      - '**/*.java'
-      - '**/pom.xml'
-      - '.mvn/**'
-      - 'mvnw'
-      - 'mvnw.cmd'
-      - 'sonar-project.properties'
-      - '.github/workflows/sonarcloud.yml'
-  # workflow_dispatch:  # enable if you want manual runs
+      - "**/*.java"
+      - "pom.xml"
+      - "**/pom.xml"
+      - ".mvn/**"
+      - "mvnw"
+      - "mvnw.cmd"
+      - "sonar-project.properties"
+      - "**/sonar-project.properties"
+      - ".github/workflows/**"
+  workflow_dispatch:
 
 # Concurrency – cancel superseded runs on the same ref
 concurrency:
@@ -97,7 +104,7 @@ jobs:
 
       # JDK 17 with Maven cache
       - name: Set up JDK 17
-        uses: actions/setup-java@8df1039502a15bceb9433410b1a100fbe190c50f # v4
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165
         with:
           distribution: temurin
           java-version: '17'
