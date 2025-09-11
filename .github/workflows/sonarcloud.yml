@@ -66,7 +66,7 @@ jobs:
   build-and-analyze:
     name: Ant build + SonarCloud + SARIF artifact
     runs-on: ubuntu-24.04
-    timeout-minutes: 200
+    timeout-minutes: 800
     permissions:
       contents: read
 
@@ -180,10 +180,10 @@ jobs:
             --define sonar.exclusions=**/antbuild/**,**/*.war,**/*.jar
             --define sonar.java.binaries=${{ env.JAVA_BINARIES }}
             --define sonar.java.libraries=${{ env.JAVA_LIBS || 'lib/**/*.jar' }}
-            --define sonar.host.url=https://sonarcloud.io
             --define sonar.c.file.suffixes=-
             --define sonar.cpp.file.suffixes=-
             --define sonar.objc.file.suffixes=-
+            # --define sonar.host.url=https://sonarcloud.io
 
       - name: Generate SARIF from SonarCloud issues
         env:
@@ -205,7 +205,7 @@ jobs:
               req = urllib.request.Request(url)
               auth = base64.b64encode((token + ":").encode()).decode()
               req.add_header("Authorization", "Basic " + auth)
-              with urllib.request.urlopen(req, timeout=30) as r:
+              with urllib.request.urlopen(req, timeout=120) as r:
                   return json.load(r)
 
           base = "https://sonarcloud.io"
@@ -284,7 +284,7 @@ jobs:
     name: Publish SARIF to Code Scanning
     needs: build-and-analyze
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 800
     permissions:
       contents: read
       security-events: write
