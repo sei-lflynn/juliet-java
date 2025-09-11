@@ -52,6 +52,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "**/*.java"
+      - "build.xml"
       - "pom.xml"
       - "**/pom.xml"
       - ".mvn/**"
