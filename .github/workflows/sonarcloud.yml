@@ -66,7 +66,7 @@ jobs:
   build-and-analyze:
     name: Ant build + SonarCloud + SARIF artifact
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 200
     permissions:
       contents: read
 
@@ -120,34 +120,53 @@ jobs:
           # If your build needs a specific target, replace the plain 'ant' with 'ant compile' or similar.
           ant -noinput -buildfile build.xml
 
-      - name: Detect compiled class directories for Sonar
+      - name: Gather Java bytecode for Sonar (Juliet)
         id: bins
         run: |
           set -euo pipefail
-          # Common Ant output dirs: build/classes, classes, bin, out
-          # Collect all that exist and contain .class files
-          mapfile -t dirs < <(find . \
-            -type d \( -path "*/build/classes" -o -name "classes" -o -name "bin" -o -name "out" \) \
-            -print | sort -u)
+          OUT="build/sonar-classes"
+          rm -rf "$OUT" && mkdir -p "$OUT"
 
-          found=""
-          for d in "${dirs[@]}"; do
-            if find "$d" -type f -name "*.class" -print -quit | grep -q .; then
-              if [ -z "$found" ]; then found="$d"; else found="$found,$d"; fi
-            fi
+          echo "::group::Search for loose .class files"
+          mapfile -t CLASS_FILES < <(find . -type f -name '*.class' -print || true)
+          echo "Found ${#CLASS_FILES[@]} loose .class files"
+          for f in "${CLASS_FILES[@]}"; do
+            dest="$OUT/${f#./}"
+            mkdir -p "$(dirname "$dest")"
+            cp -p "$f" "$dest"
           done
+          echo "::endgroup::"
 
-          if [ -z "$found" ] && [ -d "$FALLBACK_BIN" ]; then
-            found="$FALLBACK_BIN"
+          if ! find "$OUT" -type f -name '*.class' -print -quit | grep -q .; then
+            echo "::group::No loose classes; extracting from WAR/JAR artifacts"
+            # Unpack classes from WARs (WEB-INF/classes) and JARs produced by sub-builds
+            while IFS= read -r -d '' a; do
+              case "$a" in
+                *.war) unzip -q -o "$a" 'WEB-INF/classes/*' -d "$OUT/unpack" || true ;;
+                *.jar) unzip -q -o "$a" -d "$OUT/unpack" || true ;;
+              esac
+            done < <(find . -type f \( -name '*.war' -o -name '*.jar' \) -print0 || true)
+
+            if [ -d "$OUT/unpack" ]; then
+              rsync -a "$OUT/unpack/" "$OUT/" && rm -rf "$OUT/unpack"
+            fi
+            echo "::endgroup::"
           fi
 
-          if [ -z "$found" ]; then
-            echo "No compiled classes found. Make sure Ant produces classes (e.g., into build/classes)." >&2
+          # Final check
+          if ! find "$OUT" -type f -name '*.class' -print -quit | grep -q .; then
+            echo "Still no .class files after build + extraction." >&2
+            echo "Tip: ensure Ant actually compiles (e.g., 'ant compile' or 'ant jar')." >&2
             exit 1
           fi
 
-          echo "JAVA_BINARIES=$found" >> "$GITHUB_ENV"
-          echo "Detected class dirs: $found"
+          echo "JAVA_BINARIES=$OUT" >> "$GITHUB_ENV"
+
+          # Optional: provide libraries to improve type resolution
+          LIBS=$(find lib -type f -name '*.jar' -printf '%p,' 2>/dev/null | sed 's/,$//')
+          if [ -n "$LIBS" ]; then
+            echo "JAVA_LIBS=$LIBS" >> "$GITHUB_ENV"
+          fi
 
       - name: SonarCloud scan (CLI scanner)
         uses: SonarSource/sonarqube-scan-action@1a6d90ebcb0e6a6b1d87e37ba693fe453195ae25 # v5.3.1
@@ -157,6 +176,7 @@ jobs:
           # Let sonar-project.properties provide org/project; pass compiled classes explicitly
           args: >
             --define sonar.java.binaries=${{ env.JAVA_BINARIES }}
+            --define sonar.java.libraries=${{ env.JAVA_LIBS || 'lib/**/*.jar' }}
 
       - name: Generate SARIF from SonarCloud issues
         env:
@@ -257,7 +277,7 @@ jobs:
     name: Publish SARIF to Code Scanning
     needs: build-and-analyze
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
