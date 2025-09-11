@@ -36,6 +36,7 @@ on:
     paths:
       # Java / Maven files (cover root and submodules)
       - "**/*.java"
+      - "build.xml"
       - "pom.xml"
       - "**/pom.xml"
       - ".mvn/**"
