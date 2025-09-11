@@ -174,7 +174,10 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           # Let sonar-project.properties provide org/project; pass compiled classes explicitly
+          # Exclude all antbuild directories from analysis; only scan the real sources.
           args: >
+            --define sonar.sources=src
+            --define sonar.exclusions=**/antbuild/**,**/*.war,**/*.jar
             --define sonar.java.binaries=${{ env.JAVA_BINARIES }}
             --define sonar.java.libraries=${{ env.JAVA_LIBS || 'lib/**/*.jar' }}
 
