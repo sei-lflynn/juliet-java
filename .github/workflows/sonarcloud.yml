@@ -180,6 +180,10 @@ jobs:
             --define sonar.exclusions=**/antbuild/**,**/*.war,**/*.jar
             --define sonar.java.binaries=${{ env.JAVA_BINARIES }}
             --define sonar.java.libraries=${{ env.JAVA_LIBS || 'lib/**/*.jar' }}
+            --define sonar.host.url=https://sonarcloud.io
+            --define sonar.c.file.suffixes=-
+            --define sonar.cpp.file.suffixes=-
+            --define sonar.objc.file.suffixes=-
 
       - name: Generate SARIF from SonarCloud issues
         env:
