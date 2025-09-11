@@ -1,7 +1,7 @@
  # SonarCloud analysis for this Java repo
 # -----------------------------------------------------------------------------
 # What this does:
-#   1) Builds the code with a Java-centric SonarCloud workflow that uses the Sonar Maven scanner
+#   1) Builds the code with a Java-centric SonarCloud workflow that uses the Sonar Ant scanner
 #   2) Runs the SonarCloud scanner
 #   3) Waits for analysis to finish, pulls issues from SonarCloud's API,
 #      converts to SARIF, uploads as an artifact
@@ -25,27 +25,22 @@
 # Secret needed:
 #   • SONAR_TOKEN (Actions → Secrets) – a SonarCloud user token with access to the project
 
-# SonarCloud analysis for a Java/Maven repo (hardened + least privilege)
+# SonarCloud analysis for a Java/Ant repo (hardened + least privilege)
 # ---------------------------------------------------------------------
 
-name: SonarCloud (Java)
+# SonarCloud analysis for an Ant-based Java repo (Juliet Java v1.3)
+# Hardened egress, default-deny perms, scoped checkout, concurrency, SARIF upload
+
+name: SonarCloud (Java - Ant)
 
 on:
   push:
     branches: [ "main" ]
     paths:
-      # Java / Maven files (cover root and submodules)
       - "**/*.java"
       - "build.xml"
-      - "pom.xml"
-      - "**/pom.xml"
-      - ".mvn/**"
-      - "mvnw"
-      - "mvnw.cmd"
-      # Sonar properties (cover root and subdirs)
       - "sonar-project.properties"
       - "**/sonar-project.properties"
-      # Any workflow edits
       - ".github/workflows/sonarcloud.yml"
   pull_request:
     branches: [ "main" ]
@@ -53,40 +48,38 @@ on:
     paths:
       - "**/*.java"
       - "build.xml"
-      - "pom.xml"
-      - "**/pom.xml"
-      - ".mvn/**"
-      - "mvnw"
-      - "mvnw.cmd"
       - "sonar-project.properties"
       - "**/sonar-project.properties"
       - ".github/workflows/**"
   workflow_dispatch:
 
-# Concurrency – cancel superseded runs on the same ref
+# Cancel older in-flight runs on same ref
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
-# Default-deny permissions at the workflow level (read-only)
+# Default-deny: read-only at workflow level
 permissions:
   contents: read
 
 jobs:
   build-and-analyze:
-    name: Build + SonarCloud analyze + SARIF artifact
+    name: Ant build + SonarCloud + SARIF artifact
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     permissions:
-      contents: read   # read-only; no write scopes here
+      contents: read
+
+    env:
+      # Optional: set a fallback for binaries if you know it (adjust if Juliet uses a different dir)
+      FALLBACK_BIN: build/classes
 
     steps:
-      # Harden egress – start in audit; switch to block + allowlist when stable
       - name: Harden runner (audit egress)
         uses: step-security/harden-runner@ec9f2d5744a09debf3a187a3f4f675c53b671911 # v2.13.0
         with:
           egress-policy: audit
-          # When stable, prefer:
+          # When stable, consider:
           # egress-policy: block
           # allowed-endpoints: >
           #   sonarcloud.io
@@ -97,40 +90,74 @@ jobs:
           #   uploads.github.com
           #   objects.githubusercontent.com
 
-      # Scoped checkout credentials – don't persist the GitHub token in the repo
       - name: Checkout (no persisted creds)
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # JDK 17 with Maven cache
       - name: Set up JDK 17
-        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5
         with:
           distribution: temurin
           java-version: '17'
-          cache: 'maven'
+          # IMPORTANT: no 'cache: maven' since this repo has no pom.xml
 
-      # Optional: quick env sanity check
-      - name: Show Java & Maven versions
+      - name: Ensure Ant is available
         run: |
           set -eux
+          if ! command -v ant >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y ant
+          fi
+          ant -version
           java -version
-          mvn -v
 
-      # Build and test
-      - name: Build with Maven
-        run: mvn -B -DskipTests=false clean verify
+      - name: Build with Ant
+        run: |
+          set -euxo pipefail
+          # Use the repo's default Ant target (build.xml in repo root)
+          # If your build needs a specific target, replace the plain 'ant' with 'ant compile' or similar.
+          ant -noinput -buildfile build.xml
 
-      # SonarCloud analysis via Maven scanner
-      - name: SonarCloud scan (Maven)
+      - name: Detect compiled class directories for Sonar
+        id: bins
+        run: |
+          set -euo pipefail
+          # Common Ant output dirs: build/classes, classes, bin, out
+          # Collect all that exist and contain .class files
+          mapfile -t dirs < <(find . \
+            -type d \( -path "*/build/classes" -o -name "classes" -o -name "bin" -o -name "out" \) \
+            -print | sort -u)
+
+          found=""
+          for d in "${dirs[@]}"; do
+            if find "$d" -type f -name "*.class" -print -quit | grep -q .; then
+              if [ -z "$found" ]; then found="$d"; else found="$found,$d"; fi
+            fi
+          done
+
+          if [ -z "$found" ] && [ -d "$FALLBACK_BIN" ]; then
+            found="$FALLBACK_BIN"
+          fi
+
+          if [ -z "$found" ]; then
+            echo "No compiled classes found. Make sure Ant produces classes (e.g., into build/classes)." >&2
+            exit 1
+          fi
+
+          echo "JAVA_BINARIES=$found" >> "$GITHUB_ENV"
+          echo "Detected class dirs: $found"
+
+      - name: SonarCloud scan (CLI scanner)
+        uses: SonarSource/sonarqube-scan-action@1a6d90ebcb0e6a6b1d87e37ba693fe453195ae25 # v5.3.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
-        # If you use a self-hosted SonarQube, also pass -Dsonar.host.url=...
+        with:
+          # Let sonar-project.properties provide org/project; pass compiled classes explicitly
+          args: >
+            --define sonar.java.binaries=${{ env.JAVA_BINARIES }}
 
-      # Generate SARIF from SonarCloud issues (waits for CE task)
       - name: Generate SARIF from SonarCloud issues
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -159,8 +186,8 @@ jobs:
           project_key = read_project_key()
           print(f"Project: {project_key}")
 
-          # Wait for the most recent Compute Engine task to finish
-          for _ in range(120):  # ~6 minutes max
+          # Wait for latest Compute Engine task to finish
+          for _ in range(120):
               act = get_json(f"{base}/api/ce/activity?component={urllib.parse.quote(project_key)}&onlyCurrents=true&ps=1", token)
               tasks = act.get("tasks", [])
               if tasks:
@@ -174,7 +201,7 @@ jobs:
                   print("No CE tasks yet")
               time.sleep(3)
 
-          # Pull unresolved issues for the current branch/analysis
+          # Pull unresolved issues
           p=1; page_size=500; issues=[]
           while True:
               data = get_json(f"{base}/api/issues/search?componentKeys={urllib.parse.quote(project_key)}&resolved=false&ps={page_size}&p={p}", token)
@@ -191,53 +218,33 @@ jobs:
               return {"BLOCKER":"error","CRITICAL":"error","MAJOR":"warning","MINOR":"note","INFO":"note"}.get(sev,"warning")
 
           runs = [{
-              "tool": {
-                  "driver": {
-                      "name": "SonarCloud",
-                      "informationUri": "https://sonarcloud.io",
-                      "rules": []
-                  }
-              },
+              "tool": {"driver": {"name": "SonarCloud", "informationUri": "https://sonarcloud.io", "rules": []}},
               "results": []
           }]
-
-          rule_added = set()
+          rule_added=set()
           for it in issues:
               rid = str(it.get("rule","unknown"))
               if rid not in rule_added:
                   runs[0]["tool"]["driver"]["rules"].append({
                       "id": rid,
                       "shortDescription": {"text": (it.get("message","") or "")[:120]}
-                  })
-                  rule_added.add(rid)
-              comp = it.get("component","")
-              path = comp.split(":",1)[1] if ":" in comp else comp
-              tr = it.get("textRange") or {}
-              sl = tr.get("startLine", 1)
-              sc = (tr.get("startOffset",0) or 0) + 1
-              el = tr.get("endLine", sl)
-              ec = max(tr.get("endOffset", sc), sc)
+                  }); rule_added.add(rid)
+              comp = it.get("component",""); path = comp.split(":",1)[1] if ":" in comp else comp
+              tr = it.get("textRange") or {}; sl = tr.get("startLine", 1)
+              sc = (tr.get("startOffset",0) or 0) + 1; el = tr.get("endLine", sl); ec = max(tr.get("endOffset", sc), sc)
               runs[0]["results"].append({
-                  "ruleId": rid,
-                  "level": level(it.get("severity","MAJOR")),
+                  "ruleId": rid, "level": level(it.get("severity","MAJOR")),
                   "message": {"text": it.get("message","")},
-                  "locations": [{
-                      "physicalLocation": {
-                          "artifactLocation": {"uri": path, "uriBaseId": "PROJECT_ROOT"},
-                          "region": {"startLine": sl, "startColumn": sc, "endLine": el, "endColumn": ec}
-                      }
-                  }],
+                  "locations": [{"physicalLocation": {"artifactLocation": {"uri": path, "uriBaseId": "PROJECT_ROOT"}, "region": {"startLine": sl, "startColumn": sc, "endLine": el, "endColumn": ec}}}],
                   "fingerprints": {"sonarIssueKey": it.get("key","")}
               })
 
           pathlib.Path("reports").mkdir(parents=True, exist_ok=True)
           sarif = {"version":"2.1.0", "$schema":"https://json.schemastore.org/sarif-2.1.0.json", "runs": runs}
-          with open("reports/sonarcloud.sarif","w",encoding="utf-8") as f:
-              json.dump(sarif, f, ensure_ascii=False)
+          with open("reports/sonarcloud.sarif","w",encoding="utf-8") as f: json.dump(sarif, f, ensure_ascii=False)
           print(f"Wrote {len(issues)} issues to reports/sonarcloud.sarif")
           PY
 
-      # Keep an auditable copy of the SARIF. Do not upload secrets.
       - name: Upload SARIF as artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -253,7 +260,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      security-events: write            # narrow write scope to this job only
+      security-events: write
       actions: read
     steps:
       - name: Harden runner (audit egress)
@@ -262,7 +269,7 @@ jobs:
           egress-policy: audit
 
       - name: Download SARIF artifact
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        uses: actions/download-artifact@v5
         with:
           name: sonarcloud-sarif
           path: reports
