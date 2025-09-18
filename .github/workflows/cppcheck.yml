@@ -31,7 +31,7 @@ on:
     branches: [ "main" ]                       #  note: adjust to your default branch
     paths:
       - "**/*"                                 #  note: narrow for speed (e.g., "src/**", "lib/**")
-      - ".github/workflows/cppcheck.yml" # Re-run when this workflow changes
+      - ".github/workflows/cppcheck.yml"       # Re-run when this workflow changes
 
   # Also run on pushes to main (covers direct commits / fast-forwards).
   push:
@@ -61,14 +61,16 @@ jobs:
   cppcheck-scan:
     name: Build pinned Cppcheck → scan → SARIF
     runs-on: ubuntu-24.04                      #  note: fixed runner → repeatable builds
-    timeout-minutes: 800                        #  note: cap total time (build + scan)
+    timeout-minutes: 30                        #  note: cap total time (build + scan)
     permissions:
       contents: read                           #  note: only needs to read code in this job
 
     env:
       # Pin upstream Cppcheck to an immutable commit for 2.18.3:
       CPPCHECK_REF: f726f98ed2c3277780ee133ec5338f6352d7b43b  # tag 2.18.3
-      # ^ Tip: update this hash when bumping versions; keep a changelog entry.
+      # Optional: set CPPCHECK_MAX_CONFIGS (e.g., 256) to expand #ifdef exploration
+      # CPPCHECK_MAX_CONFIGS: "256"
+      # Update the commit when bumping versions; keep a changelog entry.
 
     steps:
       # Harden outbound network. Start with "audit" to see what calls happen.
@@ -112,8 +114,7 @@ jobs:
           cd "$SRC"
           git remote add origin https://github.com/danmar/cppcheck.git
           # Fetch only the single commit we need (2.18.3 tag commit), no tags/branches
-          git -c protocol.version=2 fetch --no-tags --depth=1 origin \
-            "${CPPCHECK_REF}"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "${CPPCHECK_REF}"
           git checkout --detach FETCH_HEAD
           git rev-parse HEAD
 
@@ -144,6 +145,19 @@ jobs:
           # Discover tracked C/C++ files (fast; respects .gitignore)
           git ls-files | grep -E '\.(c|cc|cp|cxx|cpp|c\+\+|h|hh|hp|hxx|hpp|h\+\+)$' > cppcheck-filelist.txt || true
 
+          # Include *untracked* C/C++ files in the repo tree (e.g., in fresh branches / generated code).
+          # Only exclude .git itself.
+          find . -type f \
+            \( -iname '*.c' -o -iname '*.cc' -o -iname '*.cp' -o -iname '*.cxx' -o -iname '*.cpp' -o -iname '*.c++' \
+               -o -iname '*.h' -o -iname '*.hh' -o -iname '*.hp' -o -iname '*.hxx' -o -iname '*.hpp' -o -iname '*.h++' \) \
+            -not -path './.git/*' \
+            >> cppcheck-filelist.txt
+
+          # De-duplicate and normalize the list; remove empty lines.
+          sort -u cppcheck-filelist.txt | sed '/^[[:space:]]*$/d' > cppcheck-filelist.clean
+          mv cppcheck-filelist.clean cppcheck-filelist.txt
+
+          # If still nothing to analyze, emit a minimal valid SARIF and exit cleanly.
           if [ ! -s cppcheck-filelist.txt ]; then
             echo "No C/C++ files found; creating empty SARIF so the job can upload cleanly."
             ver="$(cppcheck --version | awk '{print $2}')"
@@ -163,15 +177,74 @@ jobs:
             exit 0
           fi
 
-          # Run analysis on the discovered files.
-          cppcheck \
-            --enable=all \
-            --inconclusive \
-            --inline-suppr \
-            --output-format=sarif \
-            --output-file=cppcheck-results.sarif \
-            --file-list=cppcheck-filelist.txt \
-            2> cppcheck-stderr.log
+          # Opportunistic project-aware mode
+          # If a compile_commands.json is already present, use it.
+          PROJECT_ARG=""
+          if [ -f compile_commands.json ]; then
+            PROJECT_ARG="--project=compile_commands.json"
+          else
+            # If the repo appears to be CMake-based, try to export compile_commands.json.
+            # This often increases findings by giving cppcheck real include paths/defines.
+            if [ -f CMakeLists.txt ]; then
+              echo "Detected CMake project; attempting to export compile_commands.json for better accuracy."
+              cmake -S . -B _cppcheck_build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null 2>&1 || true
+              if [ -f _cppcheck_build/compile_commands.json ]; then
+                PROJECT_ARG="--project=_cppcheck_build/compile_commands.json"
+              fi
+            fi
+          fi
+
+          # Run analysis on the discovered files (+ optional project database, if detected).
+          # NOTE: We do not pick a C/C++ standard here and we do not assume specific directories.
+
+          # Optional cap for ifdef-config exploration. Set CPPCHECK_MAX_CONFIGS (e.g., 256) to enable.
+          # Switch to "" (currently commented-out) and it will be disabled
+          # EXTRA_MAX_CONFIGS=""
+          EXTRA_MAX_CONFIGS=256
+          if [ -n "${CPPCHECK_MAX_CONFIGS:-}" ]; then
+            # Must be > 0 on modern cppcheck
+            EXTRA_MAX_CONFIGS="--max-configs=${CPPCHECK_MAX_CONFIGS}"
+          fi
+
+          #  --project CANNOT be combined with explicit files/--file-list.
+          # If PROJECT_ARG is set -> run project mode only; else -> run with file list.
+          if [ -n "${PROJECT_ARG}" ]; then
+            cppcheck \
+              --force \
+              ${EXTRA_MAX_CONFIGS} \
+              --enable=all \
+              --inconclusive \
+              --inline-suppr \
+              --output-format=sarif \
+              --output-file=cppcheck-results.sarif \
+              ${PROJECT_ARG} \
+              2> cppcheck-stderr.log
+          else
+            cppcheck \
+              --force \
+              ${EXTRA_MAX_CONFIGS} \
+              --enable=all \
+              --inconclusive \
+              --inline-suppr \
+              --output-format=sarif \
+              --output-file=cppcheck-results.sarif \
+              --file-list=cppcheck-filelist.txt \
+              2> cppcheck-stderr.log
+          fi
+
+          # Turn up "amount found" with added arguments to above:
+          # --enable=all  # includes error/warning/style/performance/portability/information categories (same severities see in XML/SARIF)
+          # --inconclusive  # Reports issues that cppcheck isn’t fully certain about (expect more false positives).
+          # --force  # Explore more paths; use CPPCHECK_MAX_CONFIGS (>0) to further increase ifdef coverage
+          # --project=compile_commands.json   # Feed real build settings (include paths, macros, flags) using your compile_commands.json
+          # Match the actual platform and language standard (e.g., `--platform=unix64 --std=c++20`)
+          # Use addons when relevant, for extra rule sets (e.g., `--addon=misra.json --enable=style .`)
+          # Consider using Clang parser, to use Clang's AST as input before running cppcheck's analyses (experimental):
+          #                  `--clang --project=compile_commands.json`
+          # --cppcheck-build-dir=.cppcheck-cache --enable=all -j"$(nproc)" # Whole-program checks (e.g., `unusedFunction`)
+
+          # Tune scope (more relevant insights, less noise):
+          # `--file-filter` and `-i` focus analysis and can reveal issues hidden in large noisy
 
           # Examples you can add:
           #   --std=c++17 --language=c++ --platform=native
@@ -195,7 +268,7 @@ jobs:
     name: Upload Cppcheck SARIF to Code Scanning
     needs: cppcheck-scan
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 5
     # Only this job can write security events (least privilege).
     permissions:
       contents: read
